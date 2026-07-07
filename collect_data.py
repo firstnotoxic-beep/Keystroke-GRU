@@ -116,8 +116,9 @@ def has_anomalous_delay(
 
 
 def has_negative_timing(features: list[float]) -> bool:
-    """True ถ้ามีค่า timing ใดตัวหนึ่งติดลบ."""
-    return any(value < 0 for value in features)
+    """True ถ้ามีค่า Hold หรือ DD ติดลบ (อนุญาตให้ UD ติดลบได้จากการพิมพ์คร่อม)"""
+    hold, dd, _ = split_feature_groups(features)
+    return any(value < 0 for value in hold + dd)
 
 
 def count_data_rows(csv_path: Path) -> int:
