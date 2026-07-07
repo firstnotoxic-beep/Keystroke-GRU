@@ -654,7 +654,7 @@ class KeystrokeCollectorApp:
         self.round.keys_down.discard(keysym)
         self.round.record_release(keysym, time.perf_counter())
 
-        if keysym == "Return" and self.round.is_complete():
+        if self.round.is_complete():
             self._finalize_round()
 
         return None
