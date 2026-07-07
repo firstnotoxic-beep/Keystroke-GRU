@@ -15,6 +15,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 from tkinter import messagebox, ttk
 
 from config import (
@@ -26,8 +27,18 @@ from config import (
     OUTPUT_COLS,
     PASSWORD,
     RAW_DATA_DIR,
+    SUBJECTS_REGISTRY_PATH,
     normalize_subject_name,
     subject_raw_path,
+)
+from subjects import (
+    SubjectEntry,
+    find_subject_by_key,
+    get_all_subjects,
+    is_duplicate_subject,
+    load_subjects_registry,
+    save_subjects_registry,
+    validate_subject_name,
 )
 
 ANOMALY_THRESHOLD_SEC = 1.5
@@ -270,6 +281,78 @@ class KeystrokeRound:
                 return
 
 
+class AddSubjectDialog:
+    """Modal dialog for registering a new subject."""
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        existing_subjects: list[SubjectEntry],
+        on_success: Callable[[str], None],
+    ) -> None:
+        self.existing_subjects = existing_subjects
+        self.on_success = on_success
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("เพิ่ม Subject")
+        self.dialog.geometry("360x200")
+        self.dialog.resizable(False, False)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        pad = {"padx": 12, "pady": 6}
+        frm = ttk.Frame(self.dialog, padding=16)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="ชื่อ Subject:").grid(row=0, column=0, sticky="w", **pad)
+        self.name_var = tk.StringVar()
+        ttk.Entry(frm, textvariable=self.name_var, width=28).grid(
+            row=0, column=1, sticky="ew", **pad
+        )
+
+        ttk.Label(frm, text="Label:").grid(row=1, column=0, sticky="w", **pad)
+        label_frame = ttk.Frame(frm)
+        label_frame.grid(row=1, column=1, sticky="w", **pad)
+        self.label_var = tk.IntVar(value=0)
+        ttk.Radiobutton(
+            label_frame, text="Owner (1)", variable=self.label_var, value=1
+        ).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            label_frame, text="Impostor (0)", variable=self.label_var, value=0
+        ).pack(side="left")
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=(12, 0))
+        ttk.Button(btn_frame, text="ยืนยัน", command=self._on_confirm).pack(
+            side="left", padx=(0, 8)
+        )
+        ttk.Button(btn_frame, text="ยกเลิก", command=self.dialog.destroy).pack(side="left")
+
+        frm.columnconfigure(1, weight=1)
+        self.dialog.bind("<Return>", lambda _e: self._on_confirm())
+        self.dialog.bind("<Escape>", lambda _e: self.dialog.destroy())
+
+    def _on_confirm(self) -> None:
+        ok, result = validate_subject_name(self.name_var.get())
+        if not ok:
+            messagebox.showwarning("ชื่อไม่ถูกต้อง", result, parent=self.dialog)
+            return
+
+        if is_duplicate_subject(result, self.existing_subjects):
+            messagebox.showwarning(
+                "ชื่อซ้ำ",
+                f"Subject '{result}' มีอยู่แล้ว — กรุณาใช้ชื่ออื่น",
+                parent=self.dialog,
+            )
+            return
+
+        registry = load_subjects_registry()
+        registry.append(SubjectEntry(name=result, label=int(self.label_var.get())))
+        save_subjects_registry(registry)
+        self.on_success(result)
+        self.dialog.destroy()
+
+
 class KeystrokeCollectorApp:
     """หน้าต่าง GUI หลักสำหรับเก็บข้อมูล Keystroke Dynamics."""
 
@@ -281,10 +364,12 @@ class KeystrokeCollectorApp:
 
         self.writer = KeystrokeDataWriter(RAW_DATA_DIR)
         self.round = KeystrokeRound()
-        self.subject_label_map = load_all_subject_label_maps(RAW_DATA_DIR)
+        self.subjects: list[SubjectEntry] = []
+        self.subject_label_map: dict[str, int] = {}
 
         self._build_ui()
         self._bind_events()
+        self._reload_subjects(select_name="Owner")
         self._refresh_counter()
         self._update_undo_button_state()
 
@@ -295,21 +380,34 @@ class KeystrokeCollectorApp:
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="Subject Name:").grid(row=0, column=0, sticky="w", **pad)
+        subject_frame = ttk.Frame(frm)
+        subject_frame.grid(row=0, column=1, sticky="ew", **pad)
         self.subject_var = tk.StringVar(value="Owner")
-        self.subject_entry = ttk.Entry(frm, textvariable=self.subject_var, width=30)
-        self.subject_entry.grid(row=0, column=1, sticky="ew", **pad)
-        self.subject_var.trace_add("write", lambda *_: self._on_subject_changed())
+        self.subject_combo = ttk.Combobox(
+            subject_frame,
+            textvariable=self.subject_var,
+            state="readonly",
+            width=22,
+        )
+        self.subject_combo.pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            subject_frame,
+            text="เพิ่ม Subject",
+            command=self._open_add_subject_dialog,
+        ).pack(side="left", padx=(8, 0))
 
         ttk.Label(frm, text="Label:").grid(row=1, column=0, sticky="w", **pad)
         label_frame = ttk.Frame(frm)
         label_frame.grid(row=1, column=1, sticky="w", **pad)
         self.label_var = tk.IntVar(value=1)
-        ttk.Radiobutton(
+        self.owner_radio = ttk.Radiobutton(
             label_frame, text="Owner (1)", variable=self.label_var, value=1
-        ).pack(side="left", padx=(0, 16))
-        ttk.Radiobutton(
+        )
+        self.owner_radio.pack(side="left", padx=(0, 16))
+        self.impostor_radio = ttk.Radiobutton(
             label_frame, text="Impostor (0)", variable=self.label_var, value=0
-        ).pack(side="left")
+        )
+        self.impostor_radio.pack(side="left")
 
         ttk.Label(frm, text="Target Password:").grid(row=2, column=0, sticky="w", **pad)
         ttk.Label(
@@ -374,6 +472,7 @@ class KeystrokeCollectorApp:
         self.password_entry.focus_set()
 
     def _bind_events(self) -> None:
+        self.subject_combo.bind("<<ComboboxSelected>>", self._on_subject_selected)
         self.password_entry.bind("<KeyPress>", self._on_key_press)
         self.password_entry.bind("<KeyRelease>", self._on_key_release)
         self.password_entry.bind("<Control-v>", lambda e: "break")
@@ -381,6 +480,54 @@ class KeystrokeCollectorApp:
         self.password_entry.bind("<Shift-Insert>", lambda e: "break")
         self.password_entry.bind("<Button-2>", lambda e: "break")
         self.password_entry.bind("<Button-3>", lambda e: "break")
+
+    def _reload_subjects(self, select_name: str | None = None) -> None:
+        """Refresh subject list from registry + raw CSV files."""
+        if not SUBJECTS_REGISTRY_PATH.exists():
+            save_subjects_registry(load_subjects_registry())
+
+        self.subjects = get_all_subjects(RAW_DATA_DIR)
+        names = [s["name"] for s in self.subjects]
+        self.subject_combo["values"] = names
+
+        self.subject_label_map = {
+            normalize_subject_name(s["name"]): int(s["label"]) for s in self.subjects
+        }
+        self.subject_label_map.update(load_all_subject_label_maps(RAW_DATA_DIR))
+
+        if select_name and find_subject_by_key(self.subjects, select_name):
+            self.subject_var.set(select_name)
+        elif names and self.subject_var.get() not in names:
+            self.subject_var.set(names[0])
+
+        self._sync_label_for_subject()
+
+    def _sync_label_for_subject(self) -> None:
+        """Set label radio from registry and lock when subject is known."""
+        entry = find_subject_by_key(self.subjects, self.subject_var.get())
+        if entry is not None:
+            self.label_var.set(int(entry["label"]))
+            self.owner_radio.config(state="disabled")
+            self.impostor_radio.config(state="disabled")
+        else:
+            self.owner_radio.config(state="normal")
+            self.impostor_radio.config(state="normal")
+
+    def _open_add_subject_dialog(self) -> None:
+        AddSubjectDialog(
+            self.root,
+            self.subjects,
+            on_success=self._on_subject_added,
+        )
+
+    def _on_subject_added(self, name: str) -> None:
+        self._reload_subjects(select_name=name)
+        self._on_subject_changed()
+        self._set_status(f"เพิ่ม Subject '{name}' แล้ว — พร้อมเก็บข้อมูล", "#1e8449")
+
+    def _on_subject_selected(self, _event: tk.Event | None = None) -> None:
+        self._sync_label_for_subject()
+        self._on_subject_changed()
 
     def _on_subject_changed(self) -> None:
         self._refresh_counter()
@@ -416,7 +563,7 @@ class KeystrokeCollectorApp:
 
         success, message = self.writer.undo_last_row_for_subject(subject)
         if success:
-            self.subject_label_map = load_all_subject_label_maps(RAW_DATA_DIR)
+            self._reload_subjects(select_name=self.subject_var.get())
             self._refresh_counter()
             self._set_status(message, "#1e8449")
         else:
@@ -555,6 +702,13 @@ class KeystrokeCollectorApp:
 
         self.writer.append_row(subject, label, features)
         self.subject_label_map[subject] = label
+
+        if find_subject_by_key(self.subjects, subject) is None:
+            registry = load_subjects_registry()
+            display_name = self.subject_var.get().strip() or subject
+            registry.append(SubjectEntry(name=display_name, label=label))
+            save_subjects_registry(registry)
+            self._reload_subjects(select_name=display_name)
 
         avg_h, avg_dd = average_hold_and_dd(features)
         self._update_feedback(avg_h, avg_dd)

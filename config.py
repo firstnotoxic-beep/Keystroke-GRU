@@ -27,6 +27,7 @@ OUTPUT_COLS = REQUIRED_COLS
 # --- Paths (pathlib, cross-platform) ---
 PROJECT_ROOT = Path(__file__).resolve().parent
 RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
+SUBJECTS_REGISTRY_PATH = PROJECT_ROOT / "data" / "subjects.json"
 RAW_DATA_PATH = PROJECT_ROOT / "data" / "real_keystroke_data.csv"
 NORMALIZED_DATA_PATH = PROJECT_ROOT / "normalized_keystroke_data.csv"
 PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed"
