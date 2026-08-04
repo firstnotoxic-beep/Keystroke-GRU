@@ -1,0 +1,6 @@
+# Local raw keystroke captures (collected on another machine)
+data/raw/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
