@@ -42,6 +42,7 @@ from subjects import (
 )
 
 ANOMALY_THRESHOLD_SEC = 1.5
+COOLDOWN_SEC = 2
 
 MODIFIER_KEYS = frozenset({
     "Shift_L", "Shift_R", "Control_L", "Control_R",
@@ -62,6 +63,8 @@ FOCUS_WARNING_MESSAGE = (
 )
 FEEDBACK_PLACEHOLDER = "H (เฉลี่ย): — s | DD (เฉลี่ย): — s"
 SUCCESS_MESSAGE = "รอบล่าสุด: สำเร็จ (พิมพ์ปกติ)"
+COOLDOWN_MESSAGE = "พักครู่หนึ่งก่อนรอบถัดไป... ({n}s)"
+READY_NEXT_ROUND_MESSAGE = "พร้อมพิมพ์รอบถัดไป"
 ANOMALY_MESSAGE = (
     "ตรวจพบจังหวะพิมพ์ชะงักผิดปกติ (อาจเกิดจากการใจลอยหรือพูดคุย) "
     "ระบบจะไม่บันทึกรอบนี้ลง CSV กรุณาพิมพ์ใหม่อีกครั้ง"
@@ -418,6 +421,8 @@ class KeystrokeCollectorApp:
         self.round = KeystrokeRound()
         self.subjects: list[SubjectEntry] = []
         self.subject_label_map: dict[str, int] = {}
+        self._cooldown_after_id: str | None = None
+        self._cooldown_remaining: int = 0
 
         self._build_ui()
         self._bind_events()
@@ -607,6 +612,48 @@ class KeystrokeCollectorApp:
             f"H (เฉลี่ย): {avg_h:.4f} s | DD (เฉลี่ย): {avg_dd:.4f} s"
         )
 
+    def _cancel_cooldown(self) -> None:
+        """ยกเลิก timer cooldown ที่ค้างอยู่ (ถ้ามี)."""
+        if self._cooldown_after_id is not None:
+            try:
+                self.root.after_cancel(self._cooldown_after_id)
+            except tk.TclError:
+                pass
+            self._cooldown_after_id = None
+        self._cooldown_remaining = 0
+
+    def _start_cooldown(self) -> None:
+        """ล็อกช่องพิมพ์ชั่วคราวหลังรอบสำเร็จ แล้วเริ่มนับถอยหลัง."""
+        self._cancel_cooldown()
+        self._cooldown_remaining = COOLDOWN_SEC
+        self.password_entry.config(state="disabled")
+        self._set_status(
+            COOLDOWN_MESSAGE.format(n=self._cooldown_remaining),
+            "#1e8449",
+        )
+        self._cooldown_after_id = self.root.after(1000, self._tick_cooldown)
+
+    def _tick_cooldown(self) -> None:
+        """นับถอยหลังทีละวินาที จนครบแล้วเปิดพิมพ์ต่อ."""
+        self._cooldown_after_id = None
+        self._cooldown_remaining -= 1
+        if self._cooldown_remaining <= 0:
+            self._end_cooldown()
+            return
+        self._set_status(
+            COOLDOWN_MESSAGE.format(n=self._cooldown_remaining),
+            "#1e8449",
+        )
+        self._cooldown_after_id = self.root.after(1000, self._tick_cooldown)
+
+    def _end_cooldown(self) -> None:
+        """เปิดช่องพิมพ์และโฟกัสกลับเมื่อ cooldown ครบ."""
+        self._cooldown_after_id = None
+        self._cooldown_remaining = 0
+        self.password_entry.config(state="normal")
+        self._set_status(READY_NEXT_ROUND_MESSAGE, "#1e8449")
+        self.password_entry.focus_set()
+
     def _on_undo_click(self) -> None:
         subject = normalize_subject_name(self.subject_var.get())
         if not subject:
@@ -782,7 +829,7 @@ class KeystrokeCollectorApp:
         self.password_var.set("")
         self._refresh_counter()
         self._update_undo_button_state()
-        self.password_entry.focus_set()
+        self._start_cooldown()
 
     def run(self) -> None:
         self.root.mainloop()
