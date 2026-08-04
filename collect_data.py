@@ -48,6 +48,14 @@ MODIFIER_KEYS = frozenset({
     "Alt_L", "Alt_R", "Meta_L", "Meta_R", "Caps_Lock",
 })
 
+ENTER_KEYSYMS = frozenset({"Return", "KP_Enter", "Enter"})
+CANONICAL_ENTER = "Return"
+
+
+def normalize_keysym(keysym: str) -> str:
+    """Unify Enter variants so press/release always match the same event."""
+    return CANONICAL_ENTER if keysym in ENTER_KEYSYMS else keysym
+
 INVALID_MESSAGE = "พบการพิมพ์ผิด: กรุณาเริ่มพิมพ์ใหม่ตั้งแต่ต้น"
 FOCUS_WARNING_MESSAGE = (
     "กรุณามีสมาธิและงดการพูดคุยขณะพิมพ์ เพื่อความแม่นยำของข้อมูลที่ใช้ฝึก AI"
@@ -238,6 +246,7 @@ class KeyEvent:
     """บันทึก press/release ของคีย์หนึ่งครั้งในลำดับการพิมพ์."""
 
     keysym: str
+    keycode: int
     press_time: float
     release_time: float | None = None
 
@@ -247,7 +256,8 @@ class KeystrokeRound:
     """สถานะการเก็บข้อมูลของรอบพิมพ์ปัจจุบัน."""
 
     events: list[KeyEvent] = field(default_factory=list)
-    keys_down: set[str] = field(default_factory=set)
+    # Track physical keys by keycode (stable across Shift state changes).
+    keys_down: set[int] = field(default_factory=set)
     invalidated: bool = False
 
     def reset(self) -> None:
@@ -274,12 +284,53 @@ class KeystrokeRound:
             and all(ev.release_time is not None for ev in self.events)
         )
 
-    def record_release(self, keysym: str, timestamp: float) -> None:
-        """จับคู่ release กับ press ล่าสุดของ keysym เดียวกัน (รองรับ overlap typing)."""
-        for ev in reversed(self.events):
-            if ev.keysym == keysym and ev.release_time is None:
-                ev.release_time = timestamp
-                return
+    def has_open_press(self, keycode: int, keysym: str | None = None) -> bool:
+        """True ถ้ายังมี press ที่ยังไม่ถูกปล่อย (จับคู่ด้วย keycode เป็นหลัก)."""
+        if keycode:
+            return any(ev.keycode == keycode and ev.release_time is None for ev in self.events)
+        if keysym is not None:
+            for ev in self.events:
+                if ev.release_time is not None:
+                    continue
+                if ev.keysym == keysym:
+                    return True
+                if (
+                    len(ev.keysym) == 1
+                    and len(keysym) == 1
+                    and ev.keysym.lower() == keysym.lower()
+                ):
+                    return True
+        return False
+
+    def record_release(
+        self,
+        keycode: int,
+        timestamp: float,
+        keysym: str | None = None,
+    ) -> bool:
+        """จับคู่ release กับ press ด้วย keycode (fallback keysym ถ้า keycode ใช้ไม่ได้)."""
+        if keycode:
+            for ev in reversed(self.events):
+                if ev.keycode == keycode and ev.release_time is None:
+                    ev.release_time = timestamp
+                    return True
+        # Fallback: match by normalized keysym when keycode is 0 or unmatched.
+        if keysym is not None:
+            for ev in reversed(self.events):
+                if ev.release_time is not None:
+                    continue
+                if ev.keysym == keysym:
+                    ev.release_time = timestamp
+                    return True
+                # Shift can change letter case between press and release keysyms.
+                if (
+                    len(ev.keysym) == 1
+                    and len(keysym) == 1
+                    and ev.keysym.lower() == keysym.lower()
+                ):
+                    ev.release_time = timestamp
+                    return True
+        return False
 
 
 class AddSubjectDialog:
@@ -599,13 +650,14 @@ class KeystrokeCollectorApp:
         self.password_entry.focus_set()
 
     def _on_key_press(self, event: tk.Event) -> str | None:
-        keysym = event.keysym
+        keysym = normalize_keysym(event.keysym)
+        keycode = int(getattr(event, "keycode", 0) or 0)
 
         if keysym in MODIFIER_KEYS:
             return None
 
         if self.round.invalidated:
-            if keysym not in ("BackSpace", "Return"):
+            if keysym not in ("BackSpace", CANONICAL_ENTER):
                 self.round.invalidated = False
             else:
                 return "break"
@@ -614,7 +666,11 @@ class KeystrokeCollectorApp:
             self._invalidate_round()
             return "break"
 
-        if keysym in self.round.keys_down:
+        # Deduplicate auto-repeat by physical key when available.
+        if keycode:
+            if keycode in self.round.keys_down:
+                return "break"
+        elif keysym in {ev.keysym for ev in self.round.events if ev.release_time is None}:
             return "break"
 
         key_idx = self.round.key_index()
@@ -624,7 +680,7 @@ class KeystrokeCollectorApp:
 
         expected = self._expected_char(key_idx)
         if expected is None:
-            if keysym != "Return":
+            if keysym != CANONICAL_ENTER:
                 self._invalidate_round()
                 return "break"
         else:
@@ -633,31 +689,43 @@ class KeystrokeCollectorApp:
                 self._invalidate_round()
                 return "break"
 
-        self.round.keys_down.add(keysym)
-        self.round.events.append(KeyEvent(keysym=keysym, press_time=time.perf_counter()))
+        if keycode:
+            self.round.keys_down.add(keycode)
+        self.round.events.append(
+            KeyEvent(keysym=keysym, keycode=keycode, press_time=time.perf_counter())
+        )
         self._set_status(f"กำลังบันทึก... ({key_idx + 1}/{NUM_KEYS} คีย์)")
-        return None
+        # Prevent Entry default handling for Enter so KeyRelease is not lost.
+        return "break" if keysym == CANONICAL_ENTER else None
 
     def _on_key_release(self, event: tk.Event) -> str | None:
-        keysym = event.keysym
+        keysym = normalize_keysym(event.keysym)
+        keycode = int(getattr(event, "keycode", 0) or 0)
 
         if keysym in MODIFIER_KEYS:
             return None
 
         if self.round.invalidated:
-            self.round.keys_down.discard(keysym)
+            if keycode:
+                self.round.keys_down.discard(keycode)
             return "break"
 
-        if keysym not in self.round.keys_down:
+        open_by_code = bool(keycode) and self.round.has_open_press(keycode)
+        open_by_sym = self.round.has_open_press(0, keysym)
+        tracked = bool(keycode) and keycode in self.round.keys_down
+
+        # Allow recording even if keys_down desynced, as long as an open press exists.
+        if not tracked and not open_by_code and not open_by_sym:
             return "break"
 
-        self.round.keys_down.discard(keysym)
-        self.round.record_release(keysym, time.perf_counter())
+        if keycode:
+            self.round.keys_down.discard(keycode)
+        self.round.record_release(keycode, time.perf_counter(), keysym=keysym)
 
         if self.round.is_complete():
             self._finalize_round()
 
-        return None
+        return "break" if keysym == CANONICAL_ENTER else None
 
     def _finalize_round(self) -> None:
         """ตรวจสอบความถูกต้อง คำนวณฟีเจอร์ และบันทึกลง CSV."""
@@ -672,11 +740,6 @@ class KeystrokeCollectorApp:
         if existing_label is not None and existing_label != label:
             messagebox.showwarning("Label ไม่สอดคล้อง", LABEL_MISMATCH_MESSAGE)
             self._invalidate_round(LABEL_MISMATCH_MESSAGE)
-            return
-
-        typed = self.password_var.get()
-        if typed != PASSWORD:
-            self._invalidate_round("รหัสผ่านไม่ตรง — เริ่มพิมพ์ใหม่")
             return
 
         if not self.round.is_complete():
