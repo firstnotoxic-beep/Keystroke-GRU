@@ -14,6 +14,7 @@ import sys
 import time
 import tkinter as tk
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from tkinter import messagebox, ttk
@@ -26,6 +27,7 @@ from config import (
     NUM_UD,
     OUTPUT_COLS,
     PASSWORD,
+    PROJECT_ROOT,
     RAW_DATA_DIR,
     SUBJECTS_REGISTRY_PATH,
     normalize_subject_name,
@@ -77,6 +79,20 @@ LABEL_MISMATCH_MESSAGE = (
     "กรุณาใช้ Label เดิมหรือเปลี่ยนชื่อ Subject"
 )
 UNDO_SUCCESS_MESSAGE = "ลบข้อมูลรอบล่าสุดสำเร็จแล้ว"
+
+CONSENT_LOG_PATH = PROJECT_ROOT / "consent_log.txt"
+CONSENT_ITEMS = (
+    "ข้อมูลที่เก็บ: ระบบจะบันทึกเฉพาะช่วงเวลาการกดและปล่อยปุ่ม (Dwell Time, Flight Time) ไม่มีการบันทึกตัวอักษรหรือรหัสผ่านจริง",
+    "วัตถุประสงค์: ข้อมูลใช้เพื่อการวิจัยระบบความปลอดภัยด้วย Keystroke Dynamics เป็นส่วนหนึ่งของโปรเจคนักศึกษาเท่านั้น ไม่ใช่เชิงพาณิชย์",
+    "การจัดเก็บ: ข้อมูลทั้งหมดบันทึกในเครื่องคอมพิวเตอร์นี้เท่านั้น ไม่มีการส่งข้อมูลออกทาง Internet",
+    "ระยะเวลา: ข้อมูลจะถูกเก็บตลอดระยะเวลาโครงการ และลบทิ้งเมื่อโครงการสิ้นสุด (ธันวาคม 2026)",
+    "สิทธิ์ถอนความยินยอม: ผู้เข้าร่วมสามารถขอถอนความยินยอมและลบข้อมูลได้ตลอดเวลา โดยแจ้งผู้วิจัย",
+    (
+        "ผู้รับผิดชอบ: [กลุ่มสมาชิกภายในโครงงาน] ภาควิชา โครงงาน "
+        "โรงเรียนวิทยาศาสตร์จุฬาภรณ์ราชวิทยาลัย\n"
+        ":อ้างอิง: พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล พ.ศ. 2562 (PDPA)"
+    ),
+)
 
 
 def build_csv_header() -> list[str]:
@@ -334,6 +350,136 @@ class KeystrokeRound:
                     ev.release_time = timestamp
                     return True
         return False
+
+
+class ConsentForm:
+    """PDPA consent window shown on the root Tk before data collection begins."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.result = False
+        self._vars = [tk.BooleanVar(value=False) for _ in CONSENT_ITEMS]
+
+        self.root.title("Keystroke Dynamics - Data Collection Consent")
+        self.root.geometry("700x680")
+        self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_decline)
+
+        self._build_ui()
+        self._center_on_screen()
+
+    def _build_ui(self) -> None:
+        frm = ttk.Frame(self.root, padding=20)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frm,
+            text="หนังสือแสดงความยินยอมในการเก็บข้อมูล",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(
+            frm,
+            text="กรุณาอ่านและทำเครื่องหมายรับทราบทุกข้อก่อนเริ่มเก็บข้อมูล",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(0, 14))
+
+        items_frame = ttk.Frame(frm)
+        items_frame.pack(fill="both", expand=True)
+
+        for index, (item, var) in enumerate(zip(CONSENT_ITEMS, self._vars), start=1):
+            row = ttk.Frame(items_frame)
+            row.pack(fill="x", pady=6)
+
+            ttk.Checkbutton(
+                row,
+                variable=var,
+                command=self._update_confirm_state,
+            ).pack(side="left", anchor="n", padx=(0, 8))
+
+            label = tk.Label(
+                row,
+                text=f"{index}. {item}",
+                wraplength=580,
+                justify="left",
+                anchor="nw",
+                font=("Segoe UI", 10),
+            )
+            label.pack(side="left", fill="x", expand=True)
+            label.bind("<Button-1>", lambda _e, v=var: self._toggle_item(v))
+
+        btn_frame = ttk.Frame(frm)
+        btn_frame.pack(fill="x", pady=(18, 0))
+
+        self.confirm_btn = ttk.Button(
+            btn_frame,
+            text="ยืนยันความยินยอม",
+            command=self._on_confirm,
+            state="disabled",
+        )
+        self.confirm_btn.pack(side="left", padx=(0, 10))
+
+        ttk.Button(
+            btn_frame,
+            text="ไม่ยินยอม / ออก",
+            command=self._on_decline,
+        ).pack(side="left")
+
+    def _center_on_screen(self) -> None:
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() - width) // 2
+        y = (self.root.winfo_screenheight() - height) // 2
+        self.root.geometry(f"+{x}+{y}")
+
+    def _toggle_item(self, var: tk.BooleanVar) -> None:
+        var.set(not var.get())
+        self._update_confirm_state()
+
+    def _update_confirm_state(self) -> None:
+        state = "normal" if all(var.get() for var in self._vars) else "disabled"
+        self.confirm_btn.config(state=state)
+
+    def _save_consent_log(self) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with CONSENT_LOG_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(f"{timestamp}  consented\n")
+        except OSError as exc:
+            messagebox.showwarning(
+                "ไม่สามารถบันทึกความยินยอมได้",
+                f"ยืนยันความยินยอมแล้ว แต่เขียนไฟล์ไม่สำเร็จ:\n{exc}",
+                parent=self.root,
+            )
+
+    def _clear_widgets(self) -> None:
+        for child in self.root.winfo_children():
+            child.destroy()
+
+    def _on_confirm(self) -> None:
+        if not all(var.get() for var in self._vars):
+            return
+        self._save_consent_log()
+        self.result = True
+        self._clear_widgets()
+        self.root.quit()
+
+    def _on_decline(self) -> None:
+        self.result = False
+        self.root.quit()
+
+    def show(self) -> bool:
+        """Block until the participant confirms or declines. Returns True if consented."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.root.mainloop()
+        return self.result
+
+
+def show_consent_form(root: tk.Tk) -> bool:
+    """Display the consent form. Returns True if consented, False if declined."""
+    return ConsentForm(root).show()
 
 
 class AddSubjectDialog:
@@ -840,6 +986,12 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
 
     root = tk.Tk()
+
+    if not show_consent_form(root):
+        root.destroy()
+        return
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
     app = KeystrokeCollectorApp(root)
     app.run()
 
