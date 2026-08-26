@@ -11,6 +11,7 @@ from config import (
     DD_COLS,
     H_COLS,
     NORMALIZED_DATA_PATH,
+    NUM_FEATURES,
     OUTPUT_COLS,
     RAW_DATA_PATH,
     UD_COLS,
@@ -37,6 +38,20 @@ def normalize_group(df: pd.DataFrame, cols: list[str], name: str) -> pd.DataFram
     if n_zero:
         print(f"WARNING: {n_zero} rows have zero-sum in {name} group — replaced with 0")
     return df[cols].div(sums.replace(0, np.nan), axis=0).fillna(0)
+
+
+def normalize_feature_vector(features: np.ndarray | list[float]) -> np.ndarray:
+    """Normalize one (31,) sample with the same intra-sequence ratio as CSV rows."""
+    arr = np.asarray(features, dtype=np.float64).reshape(-1)
+    if arr.size != NUM_FEATURES:
+        raise ValueError(f"ต้องการ {NUM_FEATURES} ฟีเจอร์ แต่ได้ {arr.size}")
+
+    groups = (arr[:11], arr[11:21], arr[21:31])
+    parts = []
+    for group in groups:
+        total = float(group.sum())
+        parts.append(np.zeros_like(group) if total == 0 else group / total)
+    return np.concatenate(parts)
 
 
 def save_data(df: pd.DataFrame, path: Path) -> None:

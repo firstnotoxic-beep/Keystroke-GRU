@@ -1,4 +1,4 @@
-tensorflow==2.10.*
+tensorflow==2.21.*
 pandas
 numpy
 scikit-learn

@@ -5,8 +5,9 @@
 import sys
 
 import numpy as np
+from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.layers import Dense, GRU, Input
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import Sequential, load_model
 
 from config import MODEL_PATH, PROCESSED_DATA_PATH
 
@@ -84,6 +85,8 @@ def main() -> None:
     # -------------------------------------------------------------------------
     # ขั้นที่ 4: เทรนโมเดล
     # -------------------------------------------------------------------------
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    used_checkpoint = False
     fit_kwargs: dict = {
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
@@ -92,16 +95,32 @@ def main() -> None:
     }
     if len(X_val) > 0:
         fit_kwargs["validation_data"] = (X_val, y_val)
+        fit_kwargs["callbacks"] = [
+            ModelCheckpoint(
+                filepath=str(MODEL_PATH),
+                monitor="val_loss",
+                save_best_only=True,
+                mode="min",
+                verbose=1,
+            )
+        ]
+        used_checkpoint = True
     else:
         print("WARNING: Validation set is empty — training without validation_data.")
 
     history = model.fit(X_train, y_train, **fit_kwargs)
     final_train_loss = history.history["loss"][-1]
     if len(X_val) > 0 and "val_loss" in history.history:
-        final_val_loss = history.history["val_loss"][-1]
+        val_losses = history.history["val_loss"]
+        best_epoch = int(np.argmin(val_losses) + 1)
+        best_val_loss = val_losses[best_epoch - 1]
+        final_val_loss = val_losses[-1]
         print(
             f"[4] เทรนเสร็จ {EPOCHS} epochs — "
             f"loss(train)={final_train_loss:.4f}, loss(val)={final_val_loss:.4f}"
+        )
+        print(
+            f"    Best val_loss={best_val_loss:.4f} at epoch {best_epoch}"
         )
     else:
         print(
@@ -112,9 +131,12 @@ def main() -> None:
     # -------------------------------------------------------------------------
     # ขั้นที่ 5: บันทึกโมเดล
     # -------------------------------------------------------------------------
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    model.save(MODEL_PATH)
-    print(f"[5] บันทึกโมเดลแล้ว → {MODEL_PATH.resolve()}")
+    if used_checkpoint:
+        model = load_model(MODEL_PATH)
+        print(f"[5] โหลดโมเดล val_loss ต่ำสุดแล้ว → {MODEL_PATH.resolve()}")
+    else:
+        model.save(MODEL_PATH)
+        print(f"[5] บันทึกโมเดลแล้ว → {MODEL_PATH.resolve()}")
 
 
 if __name__ == "__main__":

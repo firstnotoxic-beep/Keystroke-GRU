@@ -32,6 +32,8 @@ RAW_DATA_PATH = PROJECT_ROOT / "data" / "real_keystroke_data.csv"
 NORMALIZED_DATA_PATH = PROJECT_ROOT / "normalized_keystroke_data.csv"
 PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed"
 MODEL_PATH = PROJECT_ROOT / "models" / "keystroke_gru_model.h5"
+# P(owner) at or above this value is accepted as the owner.
+OWNER_THRESHOLD = 0.5
 DSL_DATA_PATH = PROJECT_ROOT / "data" / "raw_data" / "DSL-StrongPasswordData.csv"
 
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
