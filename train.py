@@ -2,14 +2,16 @@
 สคริปต์เทรนโมเดล GRU สำหรับ Keystroke Dynamics (Binary Classification: Owner vs Impostor)
 """
 
+import csv
 import sys
+from collections import Counter
 
 import numpy as np
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.layers import Dense, GRU, Input
 from tensorflow.keras.models import Sequential, load_model
 
-from config import MODEL_PATH, PROCESSED_DATA_PATH
+from config import MODEL_PATH, NORMALIZED_DATA_PATH, PROCESSED_DATA_PATH
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -52,6 +54,16 @@ def main() -> None:
         f"    Val   — Owner (1): {int(y_val.sum())}, "
         f"Impostor (0): {int(len(y_val) - y_val.sum())}"
     )
+    if NORMALIZED_DATA_PATH.is_file():
+        subject_counts: Counter[str] = Counter()
+        with NORMALIZED_DATA_PATH.open(newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                subject_counts[row["Subject_Name"]] += 1
+        print("    Row counts per subject:")
+        for name, count in sorted(subject_counts.items()):
+            print(f"      {name}: {count}")
+    else:
+        print(f"    WARNING: {NORMALIZED_DATA_PATH} not found — skip subject row counts")
 
     # -------------------------------------------------------------------------
     # ขั้นที่ 2: คำนวณ class_weight (แก้ Data Imbalance) — pure numpy
@@ -62,10 +74,7 @@ def main() -> None:
         0: total_samples / (2 * counts[0]),
         1: total_samples / (2 * counts[1]),
     }
-    print(
-        f"Class weights applied: "
-        f"{{0: {class_weight_dict[0]:.4f}}}, {{1: {class_weight_dict[1]:.4f}}}"
-    )
+    print(f"Computed class_weight: {class_weight_dict}")
 
     # -------------------------------------------------------------------------
     # ขั้นที่ 3: สร้างโมเดล GRU + Dense (sigmoid)

@@ -1,34 +1,55 @@
 """
 Login interface: capture keystroke of .tie5Roanl + Enter, classify Owner vs Impostor.
-Impostor → lock the Windows workstation.
+Real-time continuous authentication GUI (pynput Producer-Consumer).
+Impostor streak → optionally lock the Windows workstation (unless DRY_RUN).
 """
 
 from __future__ import annotations
 
+import csv
 import ctypes
+import queue
 import sys
+import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
+from typing import Any
 
 import numpy as np
+from pynput import keyboard
 from tensorflow.keras.models import load_model
 
 from collect_data import (
     CANONICAL_ENTER,
     INVALID_MESSAGE,
-    MODIFIER_KEYS,
     KeyEvent,
     KeystrokeRound,
     extract_features,
     has_negative_timing,
-    normalize_keysym,
 )
-from config import MODEL_PATH, NUM_FEATURES, NUM_KEYS, OWNER_THRESHOLD, PASSWORD
+from config import (
+    DRY_RUN,
+    LOGIN_THRESHOLD,
+    MAX_CONSECUTIVE_FAILS,
+    MODEL_PATH,
+    NUM_FEATURES,
+    NUM_KEYS,
+    PASSWORD,
+    PROJECT_ROOT,
+)
 from preprocess import normalize_feature_vector
 from split_and_save import reshape_to_3d
 
 LOCK_DELAY_MS = 400
+LOGIN_LOG_PATH = PROJECT_ROOT / "data" / "login_log.csv"
+VALIDATION_FAIL_MESSAGE = "ข้อมูล timing ไม่ถูกต้อง — กรุณาพิมพ์ใหม่"
+PASTE_BLOCK_MESSAGE = "ตรวจพบการวางข้อความ (Ctrl+V) — กรุณาพิมพ์ใหม่"
+DELETE_RESET_MESSAGE = "ลบข้อความแล้ว — กรุณาพิมพ์ใหม่"
+
+# Sentinel to stop the consumer thread.
+_STOP = object()
 
 
 def lock_workstation() -> bool:
@@ -39,6 +60,67 @@ def lock_workstation() -> bool:
     return True
 
 
+def _append_login_log(p_owner: float, action: str) -> None:
+    """Append one prediction row to data/login_log.csv (demo evidence)."""
+    LOGIN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not LOGIN_LOG_PATH.is_file()
+    with LOGIN_LOG_PATH.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        if write_header:
+            writer.writerow(["timestamp", "p_owner", "action"])
+        writer.writerow(
+            [datetime.now().isoformat(timespec="seconds"), f"{p_owner:.6f}", action]
+        )
+
+
+def _pynput_vk(key: Any) -> int:
+    return int(getattr(key, "vk", 0) or 0)
+
+
+def _is_ctrl_key(key: Any) -> bool:
+    return key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
+
+
+def _is_enter_key(key: Any) -> bool:
+    return key in (keyboard.Key.enter,)
+
+
+def _is_backspace_key(key: Any) -> bool:
+    return key == keyboard.Key.backspace
+
+
+def _is_delete_key(key: Any) -> bool:
+    return key == keyboard.Key.delete
+
+
+def _is_paste_v(key: Any) -> bool:
+    """True for V / Ctrl+V control char under modifiers (Windows vk 0x56)."""
+    if isinstance(key, keyboard.KeyCode):
+        ch = key.char
+        if ch in ("v", "V", "\x16"):
+            return True
+        if _pynput_vk(key) == 0x56:
+            return True
+    return False
+
+
+def _key_to_symbol(key: Any) -> tuple[str | None, int]:
+    """Map a pynput key to (keysym-like token, vk/keycode) for KeystrokeRound."""
+    vk = _pynput_vk(key)
+    if _is_enter_key(key):
+        return CANONICAL_ENTER, vk or 13
+    if _is_backspace_key(key):
+        return "BackSpace", vk or 8
+    if _is_delete_key(key):
+        return "Delete", vk or 46
+    if isinstance(key, keyboard.KeyCode) and key.char:
+        # Ignore pure control chars except we already handled paste separately.
+        if ord(key.char) < 32:
+            return None, vk
+        return key.char, vk
+    return None, vk
+
+
 class KeystrokeLoginApp:
     def __init__(self, root: tk.Tk, model) -> None:
         self.root = root
@@ -46,15 +128,32 @@ class KeystrokeLoginApp:
         self.round = KeystrokeRound()
         self.password_var = tk.StringVar()
         self.status_var = tk.StringVar(value="พิมพ์รหัสผ่านแล้วกด Enter")
+        self.fail_count_var = tk.StringVar(value="Fail streak: 0")
         self.busy = False
+        self.ready = False
+        self.fail_count = 0
+        self.ctrl_down = False
+        self._event_queue: queue.Queue[Any] = queue.Queue()
+        self._stop_event = threading.Event()
+        self._listener: keyboard.Listener | None = None
+        self._consumer: threading.Thread | None = None
 
         self.root.title("Keystroke Dynamics Login")
-        self.root.geometry("520x280")
+        self.root.geometry("520x300")
         self.root.resizable(False, False)
 
         self._build_ui()
-        self._bind_keys()
+        # Block Entry from handling keys itself; timing comes from pynput.
+        self.password_entry.bind("<Key>", lambda _e: "break")
         self.password_entry.focus_set()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        dry_note = " [DRY_RUN]" if DRY_RUN else ""
+        self._set_status(
+            f"กำลังอุ่นโมเดล...{dry_note}",
+            "#7f8c8d",
+        )
+        self.root.after(50, self._finish_startup)
 
     def _build_ui(self) -> None:
         frm = ttk.Frame(self.root, padding=20)
@@ -87,13 +186,27 @@ class KeystrokeLoginApp:
         )
         self.status_label.pack(anchor="w", pady=(8, 0))
 
-    def _bind_keys(self) -> None:
-        self.password_entry.bind("<KeyPress>", self._on_key_press)
-        self.password_entry.bind("<KeyRelease>", self._on_key_release)
+        self.fail_label = ttk.Label(
+            frm,
+            textvariable=self.fail_count_var,
+            font=("Segoe UI", 9),
+            foreground="#7f8c8d",
+        )
+        self.fail_label.pack(anchor="w", pady=(8, 0))
 
     def _set_status(self, message: str, color: str = "#2c3e50") -> None:
         self.status_var.set(message)
         self.status_label.configure(foreground=color)
+
+    def _ui(self, fn) -> None:
+        """Schedule a UI update on the Tk main thread."""
+        self.root.after(0, fn)
+
+    def _update_fail_label(self) -> None:
+        mode = "DRY_RUN" if DRY_RUN else "LIVE"
+        self.fail_count_var.set(
+            f"Fail streak: {self.fail_count}/{MAX_CONSECUTIVE_FAILS} ({mode})"
+        )
 
     def _expected_char(self, index: int) -> str | None:
         if index < len(PASSWORD):
@@ -102,6 +215,12 @@ class KeystrokeLoginApp:
             return None
         return ""
 
+    def _window_focused(self) -> bool:
+        try:
+            return self.root.focus_displayof() is not None
+        except tk.TclError:
+            return False
+
     def _invalidate_round(self, message: str = INVALID_MESSAGE) -> None:
         self.round.reset()
         self.round.invalidated = True
@@ -109,124 +228,225 @@ class KeystrokeLoginApp:
         self._set_status(message, "#c0392b")
         self.password_entry.focus_set()
 
-    def _on_key_press(self, event: tk.Event) -> str | None:
-        if self.busy:
-            return "break"
+    def _finish_startup(self) -> None:
+        """Warm-up predict, then start Producer (listener) + Consumer threads."""
+        try:
+            # Must run before accepting real input (requirement).
+            self.model.predict(np.zeros((1, 11, 3), dtype=np.float32), verbose=0)
+        except Exception as exc:  # noqa: BLE001 — show warm-up failure in UI
+            self._set_status(f"อุ่นโมเดลไม่สำเร็จ: {exc}", "#c0392b")
+            return
 
-        keysym = normalize_keysym(event.keysym)
-        keycode = int(getattr(event, "keycode", 0) or 0)
+        self.ready = True
+        dry_note = " (DRY_RUN — จะไม่ล็อกหน้าจอ)" if DRY_RUN else ""
+        self._set_status(f"พิมพ์รหัสผ่านแล้วกด Enter{dry_note}", "#2c3e50")
+        self._update_fail_label()
+        self._start_threads()
 
-        if keysym in MODIFIER_KEYS:
-            return None
+    def _start_threads(self) -> None:
+        self._consumer = threading.Thread(
+            target=self._consumer_loop,
+            name="login-consumer",
+            daemon=True,
+        )
+        self._consumer.start()
+
+        self._listener = keyboard.Listener(
+            on_press=self._on_press_producer,
+            on_release=self._on_release_producer,
+        )
+        self._listener.daemon = True
+        self._listener.start()
+
+    def _on_press_producer(self, key: Any) -> None:
+        # Listener thread: enqueue only — never predict here.
+        self._event_queue.put(("press", key, time.perf_counter()))
+
+    def _on_release_producer(self, key: Any) -> None:
+        self._event_queue.put(("release", key, time.perf_counter()))
+
+    def _consumer_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                item = self._event_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is _STOP:
+                break
+            kind, key, ts = item
+            if kind == "press":
+                self._handle_press(key, ts)
+            else:
+                self._handle_release(key, ts)
+
+    def _handle_press(self, key: Any, ts: float) -> None:
+        if _is_ctrl_key(key):
+            self.ctrl_down = True
+            return
+
+        if not self.ready or self.busy or not self._window_focused():
+            return
+
+        # Ctrl+V — block paste like continuous-auth collection policy.
+        if self.ctrl_down and _is_paste_v(key):
+            self._ui(lambda: self._invalidate_round(PASTE_BLOCK_MESSAGE))
+            return
+
+        if _is_backspace_key(key) or _is_delete_key(key):
+            msg = DELETE_RESET_MESSAGE if _is_delete_key(key) else INVALID_MESSAGE
+            self._ui(lambda m=msg: self._invalidate_round(m))
+            return
+
+        symbol, keycode = _key_to_symbol(key)
+        if symbol is None:
+            return
 
         if self.round.invalidated:
-            if keysym not in ("BackSpace", CANONICAL_ENTER):
+            if symbol not in ("BackSpace", "Delete", CANONICAL_ENTER):
                 self.round.invalidated = False
             else:
-                return "break"
+                return
 
-        if keysym == "BackSpace":
-            self._invalidate_round()
-            return "break"
-
+        # Deduplicate auto-repeat while key is held.
         if keycode:
             if keycode in self.round.keys_down:
-                return "break"
-        elif keysym in {ev.keysym for ev in self.round.events if ev.release_time is None}:
-            return "break"
+                return
+        elif symbol in {ev.keysym for ev in self.round.events if ev.release_time is None}:
+            return
 
         key_idx = self.round.key_index()
         if key_idx >= NUM_KEYS:
-            self._invalidate_round("พิมพ์เกินจำนวนที่กำหนด — เริ่มใหม่")
-            return "break"
+            self._ui(lambda: self._invalidate_round("พิมพ์เกินจำนวนที่กำหนด — กรุณาพิมพ์ใหม่"))
+            return
 
         expected = self._expected_char(key_idx)
         if expected is None:
-            if keysym != CANONICAL_ENTER:
-                self._invalidate_round()
-                return "break"
+            # Final key must be Enter.
+            if symbol != CANONICAL_ENTER:
+                self._ui(lambda: self._invalidate_round(INVALID_MESSAGE))
+                return
         else:
-            char = event.char
-            if not char or char != expected:
-                self._invalidate_round()
-                return "break"
+            if symbol != expected:
+                # Key outside sequence .tie5Roanl → reset buffer.
+                self._ui(lambda: self._invalidate_round(INVALID_MESSAGE))
+                return
 
         if keycode:
             self.round.keys_down.add(keycode)
         self.round.events.append(
-            KeyEvent(keysym=keysym, keycode=keycode, press_time=time.perf_counter())
+            KeyEvent(keysym=symbol, keycode=keycode, press_time=ts)
         )
-        self._set_status(f"กำลังบันทึกจังหวะพิมพ์... ({key_idx + 1}/{NUM_KEYS})")
-        return "break" if keysym == CANONICAL_ENTER else None
+        shown = "*" * len(self.round.events)
+        idx = key_idx + 1
+        self._ui(
+            lambda s=shown, i=idx: (
+                self.password_var.set(s),
+                self._set_status(f"กำลังบันทึกจังหวะพิมพ์... ({i}/{NUM_KEYS})"),
+            )
+        )
 
-    def _on_key_release(self, event: tk.Event) -> str | None:
-        if self.busy:
-            return "break"
+    def _handle_release(self, key: Any, ts: float) -> None:
+        if _is_ctrl_key(key):
+            self.ctrl_down = False
+            return
 
-        keysym = normalize_keysym(event.keysym)
-        keycode = int(getattr(event, "keycode", 0) or 0)
+        if not self.ready or self.busy or not self._window_focused():
+            return
 
-        if keysym in MODIFIER_KEYS:
-            return None
+        symbol, keycode = _key_to_symbol(key)
+        if symbol is None and not keycode:
+            return
 
         if self.round.invalidated:
             if keycode:
                 self.round.keys_down.discard(keycode)
-            return "break"
+            return
 
         open_by_code = bool(keycode) and self.round.has_open_press(keycode)
-        open_by_sym = self.round.has_open_press(0, keysym)
+        open_by_sym = bool(symbol) and self.round.has_open_press(0, symbol)
         tracked = bool(keycode) and keycode in self.round.keys_down
 
         if not tracked and not open_by_code and not open_by_sym:
-            return "break"
+            return
 
         if keycode:
             self.round.keys_down.discard(keycode)
-        self.round.record_release(keycode, time.perf_counter(), keysym=keysym)
+        self.round.record_release(keycode, ts, keysym=symbol)
 
-        if self.round.is_complete():
+        # Predict only on KeyRelease of Enter when the round is complete.
+        if symbol == CANONICAL_ENTER and self.round.is_complete():
             self._classify_round()
 
-        return "break" if keysym == CANONICAL_ENTER else None
-
     def _classify_round(self) -> None:
+        """Validate features then predict on the consumer thread (not listener)."""
         if not self.round.is_complete():
-            self._invalidate_round("ข้อมูล timing ไม่ครบ — เริ่มพิมพ์ใหม่")
+            self._ui(lambda: self._invalidate_round("ข้อมูล timing ไม่ครบ — กรุณาพิมพ์ใหม่"))
             return
 
         try:
             features = extract_features(self.round.press_times(), self.round.release_times())
         except ValueError as exc:
-            self._invalidate_round(str(exc))
+            self._ui(lambda m=str(exc): self._invalidate_round(m))
             return
 
+        # Exactly 31 features; H >= 0 and DD >= 0 (UD may be negative).
         if len(features) != NUM_FEATURES or has_negative_timing(features):
-            self._invalidate_round("ข้อมูล timing ไม่ถูกต้อง — เริ่มพิมพ์ใหม่")
+            self._ui(lambda: self._invalidate_round(VALIDATION_FAIL_MESSAGE))
             return
 
         normalized = normalize_feature_vector(features)
         x = reshape_to_3d(normalized.reshape(1, -1))
-        prob_owner = float(self.model.predict(x, verbose=0).ravel()[0])
-        is_owner = prob_owner >= OWNER_THRESHOLD
+        p_owner = float(self.model.predict(x, verbose=0).ravel()[0])
 
         self.round.reset()
-        self.password_var.set("")
+        self._ui(lambda: self.password_var.set(""))
 
-        if is_owner:
-            self._set_status(
-                f"ผ่าน — ระบุเป็นเจ้าของเครื่อง (P(owner)={prob_owner:.3f})",
-                "#1e8449",
+        if p_owner < LOGIN_THRESHOLD:
+            self.fail_count += 1
+            action = "reject"
+            should_lock = self.fail_count >= MAX_CONSECUTIVE_FAILS and not DRY_RUN
+            if self.fail_count >= MAX_CONSECUTIVE_FAILS and DRY_RUN:
+                action = "reject_dry_run_lock_skipped"
+            elif should_lock:
+                action = "reject_lock"
+
+            _append_login_log(p_owner, action)
+            fail_n = self.fail_count
+            self._ui(lambda: self._update_fail_label())
+
+            if should_lock:
+                self.busy = True
+                self._ui(
+                    lambda p=p_owner, n=fail_n: self._set_status(
+                        f"ไม่ผ่าน — P(owner)={p:.3f} (fail {n}/{MAX_CONSECUTIVE_FAILS}) "
+                        f"กำลังล็อกหน้าจอ",
+                        "#c0392b",
+                    )
+                )
+                self._ui(lambda: self.root.after(LOCK_DELAY_MS, self._lock_and_reset))
+                return
+
+            dry = " [DRY_RUN — ไม่ล็อก]" if DRY_RUN else ""
+            self._ui(
+                lambda p=p_owner, n=fail_n, d=dry: self._set_status(
+                    f"ไม่ผ่าน — P(owner)={p:.3f} < {LOGIN_THRESHOLD} "
+                    f"(fail {n}/{MAX_CONSECUTIVE_FAILS}){d}",
+                    "#c0392b",
+                )
             )
-            self.password_entry.focus_set()
+            self._ui(lambda: self.password_entry.focus_set())
             return
 
-        self.busy = True
-        self._set_status(
-            f"ไม่ผ่าน — ระบุเป็นผู้ไม่ได้รับอนุญาต (P(owner)={prob_owner:.3f}) กำลังล็อกหน้าจอ",
-            "#c0392b",
+        self.fail_count = 0
+        _append_login_log(p_owner, "accept")
+        self._ui(lambda: self._update_fail_label())
+        self._ui(
+            lambda p=p_owner: self._set_status(
+                f"ผ่าน — ระบุเป็นเจ้าของเครื่อง (P(owner)={p:.3f})",
+                "#1e8449",
+            )
         )
-        self.root.after(LOCK_DELAY_MS, self._lock_and_reset)
+        self._ui(lambda: self.password_entry.focus_set())
 
     def _lock_and_reset(self) -> None:
         locked = lock_workstation()
@@ -237,6 +457,13 @@ class KeystrokeLoginApp:
                 "#c0392b",
             )
         self.password_entry.focus_set()
+
+    def _on_close(self) -> None:
+        self._stop_event.set()
+        self._event_queue.put(_STOP)
+        if self._listener is not None:
+            self._listener.stop()
+        self.root.destroy()
 
     def run(self) -> None:
         self.root.mainloop()

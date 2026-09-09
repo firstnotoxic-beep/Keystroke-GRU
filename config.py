@@ -34,6 +34,10 @@ PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed"
 MODEL_PATH = PROJECT_ROOT / "models" / "keystroke_gru_model.h5"
 # P(owner) at or above this value is accepted as the owner.
 OWNER_THRESHOLD = 0.5
+# Continuous-auth login threshold (login.py). Prefer this over OWNER_THRESHOLD.
+LOGIN_THRESHOLD = 0.62
+DRY_RUN = True  # When True, never call LockWorkStation (still log + update fail_count)
+MAX_CONSECUTIVE_FAILS = 3
 DSL_DATA_PATH = PROJECT_ROOT / "data" / "raw_data" / "DSL-StrongPasswordData.csv"
 
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)

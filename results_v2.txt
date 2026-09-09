@@ -1,0 +1,204 @@
+# Keystroke-GRU Results v2
+
+Preprocess fix: UD normalization uses `use_abs=True`; DD<0 rows dropped before normalization.
+
+## preprocess.py diff
+
+```diff
+diff --git a/preprocess.py b/preprocess.py
+index 6ad40f7..aa86d25 100644
+--- a/preprocess.py
++++ b/preprocess.py
+@@ -31,13 +31,45 @@ def load_data(path: Path) -> pd.DataFrame:
+     return validate_csv_schema(df)
+ 
+ 
+-def normalize_group(df: pd.DataFrame, cols: list[str], name: str) -> pd.DataFrame:
+-    """Normalize feature group by row-wise sum ratio."""
+-    sums = df[cols].sum(axis=1)
+-    n_zero = int((sums == 0).sum())
++def group_divisor(values: np.ndarray, use_abs: bool = False) -> float:
++    """Single source of truth for group normalization divisor."""
++    arr = np.asarray(values, dtype=np.float64)
++    if use_abs:
++        return float(np.abs(arr).sum())
++    return float(arr.sum())
++
++
++def normalize_group_values(values: np.ndarray, use_abs: bool = False) -> np.ndarray:
++    """Normalize one feature-group vector; raises ZeroDivisionError if divisor is 0."""
++    arr = np.asarray(values, dtype=np.float64)
++    divisor = group_divisor(arr, use_abs=use_abs)
++    if divisor == 0:
++        raise ZeroDivisionError("group divisor is zero")
++    return arr / divisor
++
++
++def normalize_group(
++    df: pd.DataFrame, cols: list[str], name: str, use_abs: bool = False
++) -> tuple[pd.DataFrame, pd.Index]:
++    """Normalize feature group by row-wise sum (or abs-sum). Returns (normalized, keep_index)."""
++    vals = df[cols].to_numpy(dtype=np.float64)
++    if use_abs:
++        divisors = np.abs(vals).sum(axis=1)
++    else:
++        divisors = vals.sum(axis=1)
++
++    zero_mask = divisors == 0
++    n_zero = int(zero_mask.sum())
+     if n_zero:
+-        print(f"WARNING: {n_zero} rows have zero-sum in {name} group — replaced with 0")
+-    return df[cols].div(sums.replace(0, np.nan), axis=0).fillna(0)
++        print(f"Dropped {n_zero} row(s) — zero divisor in {name} group")
++
++    keep = ~zero_mask
++    keep_index = df.index[keep]
++    if not keep.any():
++        return pd.DataFrame(columns=cols), keep_index
++
++    normalized = vals[keep] / divisors[keep, None]
++    return pd.DataFrame(normalized, index=keep_index, columns=cols), keep_index
+ 
+ 
+ def normalize_feature_vector(features: np.ndarray | list[float]) -> np.ndarray:
+@@ -46,12 +78,19 @@ def normalize_feature_vector(features: np.ndarray | list[float]) -> np.ndarray:
+     if arr.size != NUM_FEATURES:
+         raise ValueError(f"ต้องการ {NUM_FEATURES} ฟีเจอร์ แต่ได้ {arr.size}")
+ 
+-    groups = (arr[:11], arr[11:21], arr[21:31])
+-    parts = []
+-    for group in groups:
+-        total = float(group.sum())
+-        parts.append(np.zeros_like(group) if total == 0 else group / total)
+-    return np.concatenate(parts)
++    h = normalize_group_values(arr[:11], use_abs=False)
++    dd = normalize_group_values(arr[11:21], use_abs=False)
++    ud = normalize_group_values(arr[21:31], use_abs=True)
++    return np.concatenate([h, dd, ud])
++
++
++def drop_negative_dd(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
++    """Drop rows with any DD < 0 before normalization."""
++    neg_mask = (df[DD_COLS] < 0).any(axis=1)
++    n_drop = int(neg_mask.sum())
++    if n_drop:
++        print(f"Dropped {n_drop} row(s) — DD < 0")
++    return df.loc[~neg_mask].copy(), n_drop
+ 
+ 
+ def save_data(df: pd.DataFrame, path: Path) -> None:
+@@ -65,10 +104,45 @@ def main() -> None:
+     parser.add_argument("--input", default=str(RAW_DATA_PATH))
+     parser.add_argument("--output", default=str(NORMALIZED_DATA_PATH))
+     args = parser.parse_args()
++
+     df = load_data(Path(args.input))
+-    df[H_COLS] = normalize_group(df, H_COLS, "H")
+-    df[DD_COLS] = normalize_group(df, DD_COLS, "DD")
+-    df[UD_COLS] = normalize_group(df, UD_COLS, "UD")
++    n_input = len(df)
++
++    # Order: drop DD<0 FIRST, then compute sums and normalize
++    df, n_dd_neg = drop_negative_dd(df)
++
++    h_norm, keep_h = normalize_group(df, H_COLS, "H", use_abs=False)
++    df = df.loc[keep_h]
++    dd_norm, keep_dd = normalize_group(df, DD_COLS, "DD", use_abs=False)
++    df = df.loc[keep_dd]
++    h_norm = h_norm.loc[keep_dd]
++    ud_norm, keep_ud = normalize_group(df, UD_COLS, "UD", use_abs=True)
++    df = df.loc[keep_ud]
++    h_norm = h_norm.loc[keep_ud]
++    dd_norm = dd_norm.loc[keep_ud]
++
++    df = df.copy()
++    df[H_COLS] = h_norm.to_numpy()
++    df[DD_COLS] = dd_norm.to_numpy()
++    df[UD_COLS] = ud_norm.to_numpy()
++    df = df.reset_index(drop=True)
++
++    n_output = len(df)
++    n_dropped = n_input - n_output
++    print(f"\n=== Normalization summary ===")
++    print(f"Input rows : {n_input}")
++    print(f"Dropped    : {n_dropped}")
++    print(f"Output rows: {n_output}")
++    print(
++        f"H  min/max: {df[H_COLS].to_numpy().min():.6f} / {df[H_COLS].to_numpy().max():.6f}"
++    )
++    print(
++        f"DD min/max: {df[DD_COLS].to_numpy().min():.6f} / {df[DD_COLS].to_numpy().max():.6f}"
++    )
++    print(
++        f"UD min/max: {df[UD_COLS].to_numpy().min():.6f} / {df[UD_COLS].to_numpy().max():.6f}"
++    )
++
+     save_data(df, Path(args.output))
+ 
+ 
+```
+
+## Row counts per split (Owner / Impostor)
+
+| Split | Total | Owner (1) | Impostor (0) |
+|-------|------:|----------:|-------------:|
+| train | 980   | 700       | 280          |
+| val   | 210   | 150       | 60           |
+| test  | 210   | 150       | 60           |
+
+**Total processed rows:** 1400
+
+**Subject counts (train):**
+
+| Subject | Rows |
+|---------|-----:|
+| baitong | 100  |
+| first   | 100  |
+| heng    | 100  |
+| owner   | 1000 |
+| peak    | 100  |
+
+## class_weight
+
+```text
+{0: 1.75, 1: 0.7}   # Impostor : Owner
+```
+
+## Training — best epoch & val_loss
+
+| Metric | Value |
+|--------|------:|
+| Best epoch | 23 |
+| Lowest val_loss | 0.3932 |
+
+## Test-set evaluation
+
+### At threshold 0.5
+
+| Metric | Value |
+|--------|------:|
+| FAR | 0.3000 |
+| FRR | 0.1200 |
+| Accuracy | 0.8286 |
+
+### Lowest EER (99-level threshold scan, step 0.01)
+
+| Metric | Value |
+|--------|------:|
+| Estimated EER | 0.1883 |
+| Threshold | 0.62 |
+| FAR at EER | 0.1833 |
+| FRR at EER | 0.1933 |
+
+### classification_report (at EER threshold 0.62)
+
+```text
+              precision    recall  f1-score   support
+
+    Impostor       0.63      0.82      0.71        60
+       Owner       0.92      0.81      0.86       150
+
+    accuracy                           0.81       210
+   macro avg       0.77      0.81      0.78       210
+weighted avg       0.83      0.81      0.82       210
+```
