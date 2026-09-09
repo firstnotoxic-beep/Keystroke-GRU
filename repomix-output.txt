@@ -32,7 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Files matching these patterns are excluded: __pycache__/**, *.pyc, data/**/*.csv, *.pt, *.pth, *.h5, *.pkl, repomix-output*.txt, *.localbak, สรุปโปรเจกต์-Keystroke-GRU.txt
+- Files matching these patterns are excluded: __pycache__/**, *.pyc, data/**/*.csv, *.pt, *.pth, *.h5, *.pkl, repomix-output*.txt, *.localbak, สรุปโปรเจกต์-Keystroke-GRU.txt, repomix-output-th.txt
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -75,6 +75,140 @@ This section contains the contents of the repository's files.
 2026-08-11 12:40:50  consented
 2026-08-11 12:42:53  consented
 2026-08-11 12:43:47  consented
+</file>
+
+<file path="data/subjects.json">
+[
+  {
+    "name": "Owner",
+    "label": 1
+  }
+]
+</file>
+
+<file path=".gitignore">
+# Local raw keystroke captures (collected on another machine)
+data/raw/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+</file>
+
+<file path="evaluate.py">
+"""
+สคริปต์ประเมินโมเดล GRU บน Test Set — คำนวณ FAR/FRR และ Estimated EER
+"""
+
+import sys
+
+import numpy as np
+from sklearn.metrics import classification_report
+from tensorflow.keras.models import load_model
+
+from config import MODEL_PATH, PROCESSED_DATA_PATH
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+
+def main() -> None:
+    required_files = [
+        PROCESSED_DATA_PATH / "X_test.npy",
+        PROCESSED_DATA_PATH / "y_test.npy",
+        MODEL_PATH,
+    ]
+    for path in required_files:
+        if not path.is_file():
+            print(f"ERROR: ไม่พบไฟล์ {path}")
+            print("กรุณารัน split_and_save.py และ train.py ก่อน")
+            sys.exit(1)
+
+    X_test = np.load(PROCESSED_DATA_PATH / "X_test.npy")
+    y_test = np.load(PROCESSED_DATA_PATH / "y_test.npy")
+    model = load_model(MODEL_PATH)
+
+    y_pred_prob = model.predict(X_test, verbose=0).ravel()
+
+    n_impostor = int((y_test == 0).sum())
+    n_owner = int((y_test == 1).sum())
+
+    if n_impostor == 0 or n_owner == 0:
+        print("ERROR: Test set must contain both Owner and Impostor samples. EER is invalid.")
+        sys.exit(1)
+
+    thresholds = np.arange(0.0, 1.01, 0.01)
+    far_list, frr_list = [], []
+
+    for t in thresholds:
+        y_pred = (y_pred_prob >= t).astype(int)
+        far = ((y_pred == 1) & (y_test == 0)).sum() / n_impostor
+        frr = ((y_pred == 0) & (y_test == 1)).sum() / n_owner
+        far_list.append(far)
+        frr_list.append(frr)
+
+    far_arr = np.array(far_list)
+    frr_arr = np.array(frr_list)
+    eer_idx = int(np.argmin(np.abs(far_arr - frr_arr)))
+    eer_threshold = float(thresholds[eer_idx])
+    eer = float((far_arr[eer_idx] + frr_arr[eer_idx]) / 2)
+    far_at_eer = float(far_arr[eer_idx])
+    frr_at_eer = float(frr_arr[eer_idx])
+
+    print(f"{'Threshold':>10}  {'FAR':>8}  {'FRR':>8}")
+    print("-" * 32)
+    for t, far, frr in zip(thresholds, far_list, frr_list):
+        print(f"{t:10.2f}  {far:8.4f}  {frr:8.4f}")
+
+    print()
+    print(
+        f"Estimated EER: {eer:.4f}  |  Threshold: {eer_threshold:.2f}  |  "
+        f"FAR: {far_at_eer:.4f}  |  FRR: {frr_at_eer:.4f}"
+    )
+
+    y_pred_eer = (y_pred_prob >= eer_threshold).astype(int)
+    print()
+    print(classification_report(y_test, y_pred_eer, target_names=["Impostor", "Owner"]))
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="explore.py">
+"""Exploratory data analysis on the CMU DSL keystroke dataset (EDA only)."""
+
+import sys
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from config import DSL_DATA_PATH
+
+# NOTE: explore.py reads the raw DSL CSV schema (subject, H.period, DD.*, etc.)
+# which differs from the processed pipeline schema (H1..UD10, Label).
+# This script is for EDA only and is not part of the ML pipeline.
+
+
+def main() -> None:
+    if not DSL_DATA_PATH.is_file():
+        print(f"ERROR: Dataset file not found: {DSL_DATA_PATH}")
+        sys.exit(1)
+
+    df = pd.read_csv(DSL_DATA_PATH)
+
+    print(df.head())
+    df.info()
+
+    plt.hist(df["H.period"], bins=50, edgecolor="black")
+    plt.xlabel("Time (Seconds)")
+    plt.ylabel("Frequency")
+    plt.grid(True)
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
 </file>
 
 <file path="login.py">
@@ -335,140 +469,6 @@ def main() -> None:
     root = tk.Tk()
     app = KeystrokeLoginApp(root, model)
     app.run()
-
-
-if __name__ == "__main__":
-    main()
-</file>
-
-<file path="data/subjects.json">
-[
-  {
-    "name": "Owner",
-    "label": 1
-  }
-]
-</file>
-
-<file path=".gitignore">
-# Local raw keystroke captures (collected on another machine)
-data/raw/
-
-# Python bytecode
-__pycache__/
-*.py[cod]
-</file>
-
-<file path="evaluate.py">
-"""
-สคริปต์ประเมินโมเดล GRU บน Test Set — คำนวณ FAR/FRR และ Estimated EER
-"""
-
-import sys
-
-import numpy as np
-from sklearn.metrics import classification_report
-from tensorflow.keras.models import load_model
-
-from config import MODEL_PATH, PROCESSED_DATA_PATH
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-
-def main() -> None:
-    required_files = [
-        PROCESSED_DATA_PATH / "X_test.npy",
-        PROCESSED_DATA_PATH / "y_test.npy",
-        MODEL_PATH,
-    ]
-    for path in required_files:
-        if not path.is_file():
-            print(f"ERROR: ไม่พบไฟล์ {path}")
-            print("กรุณารัน split_and_save.py และ train.py ก่อน")
-            sys.exit(1)
-
-    X_test = np.load(PROCESSED_DATA_PATH / "X_test.npy")
-    y_test = np.load(PROCESSED_DATA_PATH / "y_test.npy")
-    model = load_model(MODEL_PATH)
-
-    y_pred_prob = model.predict(X_test, verbose=0).ravel()
-
-    n_impostor = int((y_test == 0).sum())
-    n_owner = int((y_test == 1).sum())
-
-    if n_impostor == 0 or n_owner == 0:
-        print("ERROR: Test set must contain both Owner and Impostor samples. EER is invalid.")
-        sys.exit(1)
-
-    thresholds = np.arange(0.0, 1.01, 0.01)
-    far_list, frr_list = [], []
-
-    for t in thresholds:
-        y_pred = (y_pred_prob >= t).astype(int)
-        far = ((y_pred == 1) & (y_test == 0)).sum() / n_impostor
-        frr = ((y_pred == 0) & (y_test == 1)).sum() / n_owner
-        far_list.append(far)
-        frr_list.append(frr)
-
-    far_arr = np.array(far_list)
-    frr_arr = np.array(frr_list)
-    eer_idx = int(np.argmin(np.abs(far_arr - frr_arr)))
-    eer_threshold = float(thresholds[eer_idx])
-    eer = float((far_arr[eer_idx] + frr_arr[eer_idx]) / 2)
-    far_at_eer = float(far_arr[eer_idx])
-    frr_at_eer = float(frr_arr[eer_idx])
-
-    print(f"{'Threshold':>10}  {'FAR':>8}  {'FRR':>8}")
-    print("-" * 32)
-    for t, far, frr in zip(thresholds, far_list, frr_list):
-        print(f"{t:10.2f}  {far:8.4f}  {frr:8.4f}")
-
-    print()
-    print(
-        f"Estimated EER: {eer:.4f}  |  Threshold: {eer_threshold:.2f}  |  "
-        f"FAR: {far_at_eer:.4f}  |  FRR: {frr_at_eer:.4f}"
-    )
-
-    y_pred_eer = (y_pred_prob >= eer_threshold).astype(int)
-    print()
-    print(classification_report(y_test, y_pred_eer, target_names=["Impostor", "Owner"]))
-
-
-if __name__ == "__main__":
-    main()
-</file>
-
-<file path="explore.py">
-"""Exploratory data analysis on the CMU DSL keystroke dataset (EDA only)."""
-
-import sys
-
-import matplotlib.pyplot as plt
-import pandas as pd
-
-from config import DSL_DATA_PATH
-
-# NOTE: explore.py reads the raw DSL CSV schema (subject, H.period, DD.*, etc.)
-# which differs from the processed pipeline schema (H1..UD10, Label).
-# This script is for EDA only and is not part of the ML pipeline.
-
-
-def main() -> None:
-    if not DSL_DATA_PATH.is_file():
-        print(f"ERROR: Dataset file not found: {DSL_DATA_PATH}")
-        sys.exit(1)
-
-    df = pd.read_csv(DSL_DATA_PATH)
-
-    print(df.head())
-    df.info()
-
-    plt.hist(df["H.period"], bins=50, edgecolor="black")
-    plt.xlabel("Time (Seconds)")
-    plt.ylabel("Frequency")
-    plt.grid(True)
-    plt.show()
 
 
 if __name__ == "__main__":
@@ -1965,93 +1965,6 @@ peak,0,0.09575569032460322,0.07320262858757753,0.13291506746811088,0.12288194982
 peak,0,0.1567144055405821,0.08137289575634882,0.11413561200748537,0.07044227905356971,0.08706754854174882,0.0699063515873887,0.12419153546267953,0.09193358022583482,0.07591808914418278,0.07971294342746957,0.04860475925270979,0.15346563647109016,0.07444441640834228,0.08866350434866951,0.07624286805929958,0.2370689844755357,0.11459070004423788,0.059140099823442004,0.057654623668957114,0.07065722770842443,0.0680719389920013,0.14804511427765918,0.06910541778792696,0.07358748642654835,0.07730333671969375,0.30716986930386636,0.13439140518408108,0.024754957611045077,0.0388830086794635,0.06625559315383567,0.06050381085588031
 </file>
 
-<file path="preprocess.py">
-"""Normalize keystroke features via intra-sequence ratio."""
-
-import argparse
-import sys
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-
-from config import (
-    DD_COLS,
-    H_COLS,
-    NORMALIZED_DATA_PATH,
-    NUM_FEATURES,
-    OUTPUT_COLS,
-    RAW_DATA_PATH,
-    UD_COLS,
-    validate_csv_schema,
-)
-
-
-def load_data(path: Path) -> pd.DataFrame:
-    """Load and validate CSV keystroke data."""
-    if not path.is_file():
-        print(f"ERROR: Input file not found: {path}")
-        sys.exit(1)
-    df = pd.read_csv(path)
-    if df.empty:
-        print(f"ERROR: Input file is empty (no data rows): {path}")
-        sys.exit(1)
-    return validate_csv_schema(df)
-
-
-def normalize_group(df: pd.DataFrame, cols: list[str], name: str) -> pd.DataFrame:
-    """Normalize feature group by row-wise sum ratio."""
-    sums = df[cols].sum(axis=1)
-    n_zero = int((sums == 0).sum())
-    if n_zero:
-        print(f"WARNING: {n_zero} rows have zero-sum in {name} group — replaced with 0")
-    return df[cols].div(sums.replace(0, np.nan), axis=0).fillna(0)
-
-
-def normalize_feature_vector(features: np.ndarray | list[float]) -> np.ndarray:
-    """Normalize one (31,) sample with the same intra-sequence ratio as CSV rows."""
-    arr = np.asarray(features, dtype=np.float64).reshape(-1)
-    if arr.size != NUM_FEATURES:
-        raise ValueError(f"ต้องการ {NUM_FEATURES} ฟีเจอร์ แต่ได้ {arr.size}")
-
-    groups = (arr[:11], arr[11:21], arr[21:31])
-    parts = []
-    for group in groups:
-        total = float(group.sum())
-        parts.append(np.zeros_like(group) if total == 0 else group / total)
-    return np.concatenate(parts)
-
-
-def save_data(df: pd.DataFrame, path: Path) -> None:
-    """Write normalized CSV without index."""
-    df[OUTPUT_COLS].to_csv(path, index=False)
-
-
-def main() -> None:
-    """Run CLI normalization pipeline."""
-    parser = argparse.ArgumentParser(description="Normalize keystroke CSV")
-    parser.add_argument("--input", default=str(RAW_DATA_PATH))
-    parser.add_argument("--output", default=str(NORMALIZED_DATA_PATH))
-    args = parser.parse_args()
-    df = load_data(Path(args.input))
-    df[H_COLS] = normalize_group(df, H_COLS, "H")
-    df[DD_COLS] = normalize_group(df, DD_COLS, "DD")
-    df[UD_COLS] = normalize_group(df, UD_COLS, "UD")
-    save_data(df, Path(args.output))
-
-
-if __name__ == "__main__":
-    main()
-</file>
-
-<file path="requirements.txt">
-tensorflow==2.21.*
-pandas
-numpy
-scikit-learn
-matplotlib
-</file>
-
 <file path="split_and_save.py">
 """Split normalized keystroke CSV into train/val/test .npy tensors."""
 
@@ -2319,6 +2232,93 @@ def is_duplicate_subject(name: str, subjects: list[SubjectEntry]) -> bool:
     """True if normalized name already exists in subject list."""
     key = normalize_subject_name(name)
     return any(normalize_subject_name(s["name"]) == key for s in subjects)
+</file>
+
+<file path="preprocess.py">
+"""Normalize keystroke features via intra-sequence ratio."""
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from config import (
+    DD_COLS,
+    H_COLS,
+    NORMALIZED_DATA_PATH,
+    NUM_FEATURES,
+    OUTPUT_COLS,
+    RAW_DATA_PATH,
+    UD_COLS,
+    validate_csv_schema,
+)
+
+
+def load_data(path: Path) -> pd.DataFrame:
+    """Load and validate CSV keystroke data."""
+    if not path.is_file():
+        print(f"ERROR: Input file not found: {path}")
+        sys.exit(1)
+    df = pd.read_csv(path)
+    if df.empty:
+        print(f"ERROR: Input file is empty (no data rows): {path}")
+        sys.exit(1)
+    return validate_csv_schema(df)
+
+
+def normalize_group(df: pd.DataFrame, cols: list[str], name: str) -> pd.DataFrame:
+    """Normalize feature group by row-wise sum ratio."""
+    sums = df[cols].sum(axis=1)
+    n_zero = int((sums == 0).sum())
+    if n_zero:
+        print(f"WARNING: {n_zero} rows have zero-sum in {name} group — replaced with 0")
+    return df[cols].div(sums.replace(0, np.nan), axis=0).fillna(0)
+
+
+def normalize_feature_vector(features: np.ndarray | list[float]) -> np.ndarray:
+    """Normalize one (31,) sample with the same intra-sequence ratio as CSV rows."""
+    arr = np.asarray(features, dtype=np.float64).reshape(-1)
+    if arr.size != NUM_FEATURES:
+        raise ValueError(f"ต้องการ {NUM_FEATURES} ฟีเจอร์ แต่ได้ {arr.size}")
+
+    groups = (arr[:11], arr[11:21], arr[21:31])
+    parts = []
+    for group in groups:
+        total = float(group.sum())
+        parts.append(np.zeros_like(group) if total == 0 else group / total)
+    return np.concatenate(parts)
+
+
+def save_data(df: pd.DataFrame, path: Path) -> None:
+    """Write normalized CSV without index."""
+    df[OUTPUT_COLS].to_csv(path, index=False)
+
+
+def main() -> None:
+    """Run CLI normalization pipeline."""
+    parser = argparse.ArgumentParser(description="Normalize keystroke CSV")
+    parser.add_argument("--input", default=str(RAW_DATA_PATH))
+    parser.add_argument("--output", default=str(NORMALIZED_DATA_PATH))
+    args = parser.parse_args()
+    df = load_data(Path(args.input))
+    df[H_COLS] = normalize_group(df, H_COLS, "H")
+    df[DD_COLS] = normalize_group(df, DD_COLS, "DD")
+    df[UD_COLS] = normalize_group(df, UD_COLS, "UD")
+    save_data(df, Path(args.output))
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="requirements.txt">
+tensorflow==2.21.*
+pandas
+numpy
+scikit-learn
+matplotlib
 </file>
 
 <file path="train.py">
