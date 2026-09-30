@@ -1,0 +1,6 @@
+model_name,uses_sign_flip_correction,n_train_sequences,EER(%),FAR(%),FRR(%),optimal_threshold
+GRU (with correction),True,2000,8.5,8.33,8.67,0.688587
+"GRU (ablation, no correction)",False,2000,6.33,6.67,6.0,0.324718
+SVM,True,2000,4.42,4.17,4.67,-0.074303
+Manhattan Distance,True,700,5.17,5.0,5.33,0.731743
+LSTM (optional),True,2000,13.0,13.33,12.67,0.634286

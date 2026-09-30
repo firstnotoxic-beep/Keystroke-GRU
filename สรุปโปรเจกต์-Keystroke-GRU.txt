@@ -1,0 +1,134 @@
+================================================================================
+สรุปโปรเจกต์ Keystroke-GRU
+สร้างจากไฟล์: repomix-output-th.txt
+================================================================================
+
+1) โปรเจกต์นี้คืออะไร
+--------------------------------------------------------------------------------
+ระบบยืนยันตัวตนด้วย Keystroke Dynamics (จังหวะการพิมพ์)
+จำแนกแบบ Binary Classification: Owner (เจ้าของ) vs Impostor (ผู้แอบอ้าง)
+ใช้โมเดล GRU (Gated Recurrent Unit) ผ่าน TensorFlow/Keras
+
+รหัสผ่านเป้าหมาย: .tie5Roanl + Enter
+- จำนวนคีย์: 11
+- จำนวนฟีเจอร์: 31
+  - Hold (H1–H11): 11 ค่า — ระยะเวลาที่กดค้างแต่ละคีย์
+  - DD (DD1–DD10): 10 ค่า — ช่วงเวลาระหว่างกดคีย์ต่อคีย์
+  - UD (UD1–UD10): 10 ค่า — ช่วงเวลาระหว่างปล่อยคีย์หนึ่งถึงกดคีย์ถัดไป
+
+
+2) Pipeline หลัก (ลำดับการทำงาน)
+--------------------------------------------------------------------------------
+  collect_data.py
+      ↓  เก็บข้อมูลดิบต่อคน → data/raw/raw_data_<ชื่อ>.csv
+  merge_data.py
+      ↓  รวม CSV ทุกคน → data/real_keystroke_data.csv
+  preprocess.py
+      ↓  normalize ฟีเจอร์ → normalized_keystroke_data.csv
+  split_and_save.py
+      ↓  แบ่ง train/val/test → data/processed/*.npy
+  train.py
+      ↓  เทรน GRU → models/keystroke_gru_model.h5
+  evaluate.py
+      ↓  ประเมิน FAR / FRR / EER บน test set
+
+
+3) ไฟล์โค้ดหลักมีอะไรบ้าง
+--------------------------------------------------------------------------------
+collect_data.py
+  - GUI (tkinter) สำหรับเก็บข้อมูลการพิมพ์
+  - วัดเวลา press/release แล้วแปลงเป็นฟีเจอร์ 31 ตัว
+  - บันทึกต่อ Subject ลง data/raw/
+  - มีระบบทะเบียน Subject, ตรวจ anomaly, cooldown
+
+subjects.py
+  - จัดการทะเบียนผู้ใช้ (Subject) ใน data/subjects.json
+  - ตรวจชื่อซ้ำ / อักขระต้องห้าม
+  - ช่วยหาไฟล์ raw ของแต่ละคน
+
+config.py
+  - ค่าคงที่กลางของทั้งโปรเจกต์
+  - รหัสผ่าน, จำนวนฟีเจอร์, path ต่าง ๆ
+  - อัตราส่วนแบ่งข้อมูล: train 70% / val 15% / test 15%
+  - ตรวจ schema ของ CSV (คอลัมน์และ Label ต้องเป็น 0 หรือ 1)
+
+merge_data.py
+  - รวมไฟล์ raw_data_*.csv ทุกไฟล์ใน data/raw/
+  - บันทึกเป็น data/real_keystroke_data.csv
+
+preprocess.py
+  - Normalize ฟีเจอร์แบบ intra-sequence ratio
+  - อ่านจาก real_keystroke_data.csv
+  - เขียนออกเป็น normalized_keystroke_data.csv
+
+split_and_save.py
+  - โหลดข้อมูลที่ normalize แล้ว
+  - reshape จาก (N, 31) เป็น (N, 11, 3) สำหรับ GRU
+  - แบ่ง train/val/test แล้วบันทึกเป็น .npy
+
+train.py
+  - สร้างโมเดล Sequential: Input → GRU(64) → Dense(1, sigmoid)
+  - Binary classification (Owner=1, Impostor=0)
+  - Epochs=25, Batch size=128
+  - บันทึกโมเดลที่ models/keystroke_gru_model.h5
+
+evaluate.py
+  - โหลดโมเดล + test set
+  - คำนวณ FAR, FRR ตาม threshold หลายค่า
+  - ประมาณ EER และแสดง classification report
+
+explore.py
+  - EDA (สำรวจข้อมูล) ของชุด CMU DSL
+  - ไม่ใช่ส่วนของ pipeline หลัก
+
+
+4) โครงสร้างโฟลเดอร์ / ข้อมูล
+--------------------------------------------------------------------------------
+data/
+  raw/                    ข้อมูลดิบที่เก็บจาก GUI (gitignore)
+  subjects.json           ทะเบียน Subject (ตอนนี้มี Owner, label=1)
+  real_keystroke_data.csv ข้อมูลรวมหลัง merge
+  processed/              X/y ของ train, val, test (.npy)
+  processed_data/         ไฟล์ .npy อีกชุด (ของเก่า/สำรอง)
+  raw_data/               ชุด DSL (ถ้ามี)
+
+models/
+  keystroke_gru_model.h5  โมเดลที่เทรนแล้ว
+
+ไฟล์อื่นที่เกี่ยวข้อง:
+  normalized_keystroke_data.csv   ข้อมูลหลัง normalize
+  requirements.txt                dependency: tensorflow, pandas, numpy,
+                                  scikit-learn, matplotlib
+  .gitignore                      ไม่ commit data/raw/ และ __pycache__/
+
+
+5) Label และ Subject
+--------------------------------------------------------------------------------
+Label = 1 → Owner (เจ้าของ)
+Label = 0 → Impostor (ผู้แอบอ้าง)
+
+ทะเบียนปัจจุบัน (data/subjects.json):
+  - Owner (label: 1)
+
+แต่ละ Subject จะมีไฟล์ raw แยก เช่น:
+  data/raw/raw_data_owner.csv
+
+
+6) Dependency หลัก
+--------------------------------------------------------------------------------
+- tensorflow==2.10.*
+- pandas
+- numpy
+- scikit-learn
+- matplotlib
+
+
+7) สรุปสั้น ๆ
+--------------------------------------------------------------------------------
+โปรเจกต์นี้ครบทั้งสาย: เก็บจังหวะพิมพ์ → รวม/ทำความสะอาดข้อมูล →
+แบ่งชุด → เทรน GRU → ประเมินผลด้วย FAR/FRR/EER
+เป้าหมายคือแยกเจ้าของเครื่องออกจากคนที่พิมพ์รหัสผ่านเดียวกันแต่จังหวะต่างกัน
+
+================================================================================
+จบไฟล์สรุป
+================================================================================

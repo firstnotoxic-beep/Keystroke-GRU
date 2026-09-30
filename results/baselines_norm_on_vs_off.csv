@@ -1,0 +1,7 @@
+model_name,normalization,n_train_sequences,EER(%),FAR(%),FRR(%),AUC,optimal_threshold,best_epoch,notes
+LSTM,ON,2000,13.0,13.33,12.67,0.9392,0.634286,48.0,63/300 epochs run
+LSTM,OFF,2000,3.0,3.33,2.67,0.9981,0.74453,204.0,219/300 epochs run
+Manhattan Distance,ON,700,5.17,5.0,5.33,0.985,0.731743,,accept if L1 distance <= threshold
+Manhattan Distance,OFF,700,7.08,7.5,6.67,0.9804,1.82862,,accept if L1 distance <= threshold
+SVM,ON,2000,4.42,4.17,4.67,0.9971,-0.074303,,"C=10.0, gamma=scale"
+SVM,OFF,2000,1.5,1.67,1.33,0.9986,-0.162845,,"C=1.0, gamma=scale"

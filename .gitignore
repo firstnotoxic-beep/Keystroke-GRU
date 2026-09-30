@@ -4,3 +4,22 @@ data/raw/
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# Local / sensitive runtime artifacts
+consent_log.txt
+data/login_log.csv
+data/real_keystroke_data.csv
+data/real_keystroke_data_5subj_backup.csv
+
+# Archived copy of older pipeline outputs
+archive_v1/
+
+# Experiment checkpoints (regenerate via run_experiment.py)
+models/experiment/
+
+# Repomix local exports
+repomix-output-th.txt
+repomix-output.txt.localbak
+
+# Secondary result set (5-subject backup run)
+results_5subj/

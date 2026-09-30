@@ -560,7 +560,7 @@ class KeystrokeCollectorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Keystroke Dynamics — Data Collection")
-        self.root.geometry("560x520")
+        self.root.geometry("620x500")
         self.root.resizable(False, False)
 
         self.writer = KeystrokeDataWriter(RAW_DATA_DIR)
@@ -578,6 +578,27 @@ class KeystrokeCollectorApp:
 
     def _build_ui(self) -> None:
         pad = {"padx": 12, "pady": 6}
+
+        style = ttk.Style(self.root)
+        for widget in ("TFrame", "TLabel", "TRadiobutton"):
+            style.configure(widget, background="white")
+        self.root.configure(bg="white")
+        header = tk.Frame(self.root, bg="#1f3a5f", padx=18, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Keystroke Dynamics — Data Collection",
+            font=("Segoe UI", 14, "bold"),
+            fg="white",
+            bg="#1f3a5f",
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="31 temporal features per entry: Hold (H), Down-Down (DD), Up-Down (UD)",
+            font=("Segoe UI", 9),
+            fg="#c9d6e8",
+            bg="#1f3a5f",
+        ).pack(anchor="w", pady=(2, 0))
 
         frm = ttk.Frame(self.root, padding=16)
         frm.pack(fill="both", expand=True)
@@ -625,6 +646,7 @@ class KeystrokeCollectorApp:
             text=FOCUS_WARNING_MESSAGE,
             font=("Segoe UI", 11, "bold"),
             foreground="#922b21",
+            background="white",
             wraplength=500,
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", **pad)
@@ -666,6 +688,7 @@ class KeystrokeCollectorApp:
             frm,
             textvariable=self.status_var,
             foreground="#555555",
+            background="white",
             wraplength=500,
             justify="left",
         )

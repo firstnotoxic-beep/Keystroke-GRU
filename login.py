@@ -31,18 +31,26 @@ from collect_data import (
 )
 from config import (
     DRY_RUN,
-    LOGIN_THRESHOLD,
     MAX_CONSECUTIVE_FAILS,
-    MODEL_PATH,
     NUM_FEATURES,
     NUM_KEYS,
     PASSWORD,
     PROJECT_ROOT,
+    REALTIME_MODEL_PATH as MODEL_PATH,
+    REALTIME_NORMALIZE,
+    REALTIME_THRESHOLD as LOGIN_THRESHOLD,
 )
-from preprocess import normalize_feature_vector
-from split_and_save import reshape_to_3d
+from experiment.common import intra_sequence_ratio_normalization, reshape_sequences
 
 LOCK_DELAY_MS = 400
+HEADER_BG = "#1f3a5f"
+BODY_BG = "#ffffff"
+STATUS_TINTS = {
+    "#1e8449": "#e8f6ee",
+    "#c0392b": "#fdecea",
+    "#7f8c8d": "#f2f4f5",
+    "#2c3e50": "#eef3f8",
+}
 LOGIN_LOG_PATH = PROJECT_ROOT / "data" / "login_log.csv"
 VALIDATION_FAIL_MESSAGE = "ข้อมูล timing ไม่ถูกต้อง — กรุณาพิมพ์ใหม่"
 PASTE_BLOCK_MESSAGE = "ตรวจพบการวางข้อความ (Ctrl+V) — กรุณาพิมพ์ใหม่"
@@ -139,7 +147,7 @@ class KeystrokeLoginApp:
         self._consumer: threading.Thread | None = None
 
         self.root.title("Keystroke Dynamics Login")
-        self.root.geometry("520x300")
+        self.root.geometry("540x310")
         self.root.resizable(False, False)
 
         self._build_ui()
@@ -156,47 +164,93 @@ class KeystrokeLoginApp:
         self.root.after(50, self._finish_startup)
 
     def _build_ui(self) -> None:
-        frm = ttk.Frame(self.root, padding=20)
+        self.root.configure(bg=BODY_BG)
+        header = tk.Frame(self.root, bg=HEADER_BG, padx=20, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="Keystroke Dynamics Authentication",
+            font=("Segoe UI", 14, "bold"),
+            fg="white",
+            bg=HEADER_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="ยืนยันตัวตนต่อเนื่องด้วยจังหวะการพิมพ์ (GRU)",
+            font=("Segoe UI", 9),
+            fg="#c9d6e8",
+            bg=HEADER_BG,
+        ).pack(anchor="w", pady=(2, 0))
+
+        frm = tk.Frame(self.root, bg=BODY_BG, padx=20, pady=14)
         frm.pack(fill="both", expand=True)
 
-        ttk.Label(
+        tk.Label(
             frm,
-            text="ยืนยันตัวตนด้วยจังหวะการพิมพ์",
-            font=("Segoe UI", 13, "bold"),
+            text=f"Password  ·  พิมพ์ให้ครบ {NUM_KEYS} คีย์ รวม Enter",
+            font=("Segoe UI", 9, "bold"),
+            fg="#34495e",
+            bg=BODY_BG,
         ).pack(anchor="w")
-        ttk.Label(
-            frm,
-            text=f"พิมพ์รหัสผ่านที่กำหนด ({NUM_KEYS} คีย์ รวม Enter) ให้ครบหนึ่งรอบ",
-            font=("Segoe UI", 9),
-        ).pack(anchor="w", pady=(4, 16))
-
-        ttk.Label(frm, text="Password").pack(anchor="w")
         self.password_entry = ttk.Entry(
             frm,
             textvariable=self.password_var,
-            show="*",
-            font=("Consolas", 12),
+            show="●",
+            font=("Consolas", 14),
         )
-        self.password_entry.pack(fill="x", pady=(4, 12))
+        self.password_entry.pack(fill="x", pady=(6, 12), ipady=3)
 
-        self.status_label = ttk.Label(
+        self.status_label = tk.Label(
             frm,
             textvariable=self.status_var,
-            wraplength=460,
+            wraplength=470,
+            justify="left",
+            anchor="w",
+            font=("Segoe UI", 10),
+            padx=12,
+            pady=8,
         )
-        self.status_label.pack(anchor="w", pady=(8, 0))
+        self.status_label.pack(fill="x")
 
-        self.fail_label = ttk.Label(
-            frm,
+        bottom = tk.Frame(frm, bg=BODY_BG)
+        bottom.pack(fill="x", pady=(12, 0))
+        self.fail_dots = tk.Canvas(
+            bottom,
+            width=18 * MAX_CONSECUTIVE_FAILS,
+            height=14,
+            bg=BODY_BG,
+            highlightthickness=0,
+        )
+        self.fail_dots.pack(side="left")
+        self.fail_label = tk.Label(
+            bottom,
             textvariable=self.fail_count_var,
             font=("Segoe UI", 9),
-            foreground="#7f8c8d",
+            fg="#7f8c8d",
+            bg=BODY_BG,
         )
-        self.fail_label.pack(anchor="w", pady=(8, 0))
+        self.fail_label.pack(side="left", padx=(6, 0))
+        tk.Label(
+            bottom,
+            text=f"threshold τ = {LOGIN_THRESHOLD}",
+            font=("Segoe UI", 9),
+            fg="#95a5a6",
+            bg=BODY_BG,
+        ).pack(side="right")
+        self._draw_fail_dots()
+
+    def _draw_fail_dots(self) -> None:
+        self.fail_dots.delete("all")
+        for i in range(MAX_CONSECUTIVE_FAILS):
+            x = 2 + i * 18
+            fill = "#c0392b" if i < self.fail_count else "#dfe4e8"
+            self.fail_dots.create_oval(x, 1, x + 12, 13, fill=fill, outline="")
 
     def _set_status(self, message: str, color: str = "#2c3e50") -> None:
         self.status_var.set(message)
-        self.status_label.configure(foreground=color)
+        self.status_label.configure(
+            foreground=color, background=STATUS_TINTS.get(color, "#eef3f8")
+        )
 
     def _ui(self, fn) -> None:
         """Schedule a UI update on the Tk main thread."""
@@ -207,6 +261,7 @@ class KeystrokeLoginApp:
         self.fail_count_var.set(
             f"Fail streak: {self.fail_count}/{MAX_CONSECUTIVE_FAILS} ({mode})"
         )
+        self._draw_fail_dots()
 
     def _expected_char(self, index: int) -> str | None:
         if index < len(PASSWORD):
@@ -394,8 +449,10 @@ class KeystrokeLoginApp:
             self._ui(lambda: self._invalidate_round(VALIDATION_FAIL_MESSAGE))
             return
 
-        normalized = normalize_feature_vector(features)
-        x = reshape_to_3d(normalized.reshape(1, -1))
+        vec = np.asarray(features, dtype=np.float64)
+        if REALTIME_NORMALIZE:
+            vec = intra_sequence_ratio_normalization(vec)
+        x = reshape_sequences(vec.reshape(1, -1))
         p_owner = float(self.model.predict(x, verbose=0).ravel()[0])
 
         self.round.reset()

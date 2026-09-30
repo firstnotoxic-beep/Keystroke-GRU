@@ -1,0 +1,11 @@
+seed,condition,EER,FAR,FRR,threshold,best_epoch,epochs_run
+42,with_correction,6.67,6.67,6.67,0.552864,80,80
+42,without_correction,1.83,1.67,2.0,0.306428,80,80
+7,with_correction,17.0,16.67,17.33,0.661243,23,38
+7,without_correction,1.83,1.67,2.0,0.632647,80,80
+123,with_correction,11.08,10.83,11.33,0.758807,80,80
+123,without_correction,14.42,14.17,14.67,0.74474,5,20
+2024,with_correction,8.17,8.33,8.0,0.639368,80,80
+2024,without_correction,1.42,0.83,2.0,0.56586,80,80
+99,with_correction,10.75,10.83,10.67,0.644524,80,80
+99,without_correction,3.33,3.33,3.33,0.315485,80,80
