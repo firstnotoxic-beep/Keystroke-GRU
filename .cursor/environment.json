@@ -1,0 +1,4 @@
+{
+  "name": "Keystroke-GRU",
+  "install": "bash .cursor/install.sh"
+}
